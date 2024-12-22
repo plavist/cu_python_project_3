@@ -15,11 +15,12 @@ import pandas as pd
 import dash_bootstrap_components as dbc
 from dash_bootstrap_templates import load_figure_template
 from flask import Flask, request, jsonify
+from os import getenv
 
 # Настройка шаблонов Bootstrap
 load_figure_template(["minty", "minty_dark"])
 
-API_KEY = "gqfTGXi6zHBN50BhfeaHupSotfgEoI4Q"
+API_KEY = getenv("API_KEY")
 
 server = Flask(__name__)
 
