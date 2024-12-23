@@ -16,6 +16,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     CallbackQuery,
+    ReplyKeyboardRemove,
 )
 
 BOT_TOKEN = getenv("BOT_TOKEN")
@@ -48,45 +49,51 @@ async def command_help_handler(message: Message) -> None:
 
 @dp.message(Command("weather"))
 async def command_weather_handler(message: Message, state: FSMContext):
-    await message.answer("Введите начальную точку маршрута:")
     await state.set_state(WeatherState.start_city)
+    await message.answer(
+        "Введите начальную точку маршрута",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
 
 @dp.message(WeatherState.start_city)
 async def process_start_city(message: Message, state: FSMContext):
-    await state.update_data(start_city=message.text)
-    await message.answer("Введите конечную точку:")
+    await state.update_data(start_city=[message.text])
     await state.set_state(WeatherState.end_city)
+    await message.answer(
+        "Введите конечную точку",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
 
 @dp.message(WeatherState.end_city)
 async def process_end_city(message: Message, state: FSMContext):
-    await state.update_data(end_city=message.text)
-    await message.answer(
-        "Введите промежуточные точки (через запятую) или пропустите этот шаг, используя команду /skip:"
-    )
+    await state.update_data(end_city=[message.text])
     await state.set_state(WeatherState.intermediate_cities)
+    await message.answer(
+        "Введите промежуточные точки (через запятую) или пропустите этот шаг, используя команду /skip"
+    )
 
 
 @dp.message(Command("skip"), WeatherState.intermediate_cities)
 async def skip_intermediate_cities(message: Message, state: FSMContext):
     await state.update_data(intermediate_cities=[])
-    await message.answer(
-        "Выберите период для прогноза погоды", reply_markup=days_keyboard()
-    )
     await state.set_state(WeatherState.days)
+    await message.answer(
+        "Выберите период для прогноза погоды", reply_markup=create_days_keyboard()
+    )
 
 
 @dp.message(WeatherState.intermediate_cities)
 async def process_intermediate_cities(message: Message, state: FSMContext):
     await state.update_data(intermediate_cities=message.text.split(","))
-    await message.answer(
-        "Выберите период для прогноза погоды", reply_markup=days_keyboard()
-    )
     await state.set_state(WeatherState.days)
+    await message.answer(
+        "Выберите период для прогноза погоды", reply_markup=create_days_keyboard()
+    )
 
 
-def days_keyboard():
+def create_days_keyboard():
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -101,32 +108,41 @@ def days_keyboard():
     return keyboard
 
 
-@dp.callback_query(WeatherState.days, F.data.in_(["1", "3", "5"]))
+@dp.callback_query(WeatherState.days)
 async def process_days(callback: CallbackQuery, state: FSMContext):
     await state.update_data(days=callback.data)
     data = await state.get_data()
+    await state.clear()
 
     start_city = data["start_city"]
     end_city = data["end_city"]
     intermediate_cities = data["intermediate_cities"]
-    days = data["days"]
+    days = int(data["days"])
+    print(days, type(days))
 
+    cities = start_city + intermediate_cities + end_city
     params = {
-        "start_city": start_city,
-        "end_city": end_city,
-        "intermediate_cities": intermediate_cities,
-        "days": days,
+        "cities": ",".join(cities),
     }
     response = requests.get(f"http://127.0.0.1:8050/get_data", params=params)
+    print(response.url)
     if response.status_code == 200:
         cities_data = response.json()
         for city in cities_data:
-            msg = f"Название города: {city.name}"
+            forecast_data = city.get("forecast")
+            msg = f"Прогноз погоды в городе {html.bold(city.get('name'))}\n"
+            for day in forecast_data[:days]:
+                msg += f"\nДата: {day.get('Date')}\nТемпература (°C): {day.get('Temperature')}\nСкорость ветра (м/c): {day.get('Wind Speed')}\
+                    \nВероятность осадков (%): {day.get('Precipitation Probability')}\n"
             await callback.message.answer(msg)
+
+        await callback.message.answer(
+            f"Вы можете ознакомиться с графиками по данной ссылке http://127.0.0.1:8050?start-city={start_city[0]}&end-city={end_city[0]}"
+        )
     else:
-        msg = str(response)
-        await callback.message.answer(msg)
-    await state.set_state(None)
+        error_data = response.json()
+        print(error_data)
+        await callback.message.answer(error_data.get("error"))
 
 
 @dp.message()

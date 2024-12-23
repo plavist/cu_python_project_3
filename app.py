@@ -16,6 +16,7 @@ import dash_bootstrap_components as dbc
 from dash_bootstrap_templates import load_figure_template
 from flask import Flask, request, jsonify
 from os import getenv
+from urllib.parse import urlparse, parse_qs
 
 # Настройка шаблонов Bootstrap
 load_figure_template(["minty", "minty_dark"])
@@ -61,6 +62,11 @@ def get_forecast_data(location_key):
 
 # Создание графика
 def create_graph(data, param, days=3):
+    labels = {
+        "Temperature": "Температура (°C)",
+        "Wind Speed": "Скорость ветра (м/c)",
+        "Precipitation Probability": "Вероятность осадков (%)",
+    }
     fig = go.Figure(
         data=go.Scatter(
             x=data.head(days)["Date"],
@@ -73,13 +79,12 @@ def create_graph(data, param, days=3):
         title="Прогноз погоды",
         template="minty_dark",
         xaxis_title="Дата",
-        yaxis_title=param,
+        yaxis_title=labels[param],
     )
     return fig
 
 
-# Создание DataFrame
-def create_df(data):
+def prepare_forecast_data(data):
     forecast_data = []
     for day in data:
         forecast = {
@@ -89,7 +94,12 @@ def create_df(data):
             "Precipitation Probability": day["Day"]["PrecipitationProbability"],
         }
         forecast_data.append(forecast)
-    return pd.DataFrame(forecast_data)
+    return forecast_data
+
+
+# Создание DataFrame
+def create_df(data):
+    return pd.DataFrame(prepare_forecast_data(data))
 
 
 @server.route("/get_data", methods=["GET"])
@@ -97,7 +107,7 @@ def get_data():
     city_names = request.args.get("cities")
     if not city_names:
         return jsonify({"error": 'Необходим параметр "cities"'}), 400
-
+    print(city_names)
     cities = city_names.split(",")
     cities_data = []
 
@@ -105,14 +115,21 @@ def get_data():
         location_key = get_location_key(city)
         if not location_key:
             return (
-                jsonify({"error": f"Не удалось найти данные для города {city}."}),
+                jsonify({"error": f"Не удалось найти данные для города: {city}"}),
                 400,
             )
-        forecast = get_forecast_data(location_key)
-        if forecast:
-            cities_data.append({"name": city, "forecast": forecast})
+        data = get_forecast_data(location_key)
+        if data:
+            forecast_data = prepare_forecast_data(data)
+            cities_data.append({"name": city, "forecast": forecast_data})
         else:
-            return jsonify({"error": f"Weather data not found for city: {city}"}), 404
+            return (
+                jsonify(
+                    {"error": f"Не удалось получить данные о погоде для города: {city}"}
+                ),
+                404,
+            )
+    return jsonify(cities_data), 200
 
 
 # Функция для создания карты
@@ -254,6 +271,23 @@ app.layout = dbc.Container(
 
 
 @app.callback(
+    Output("start-city", "value"),
+    Output("end-city", "value"),
+    Output("submit-btn", "n_clicks"),
+    Input("url", "search"),
+    prevent_initial_call=True,
+)
+def get_weather_from_link(search):
+    if not search:
+        return "", "", 0
+    parsed_url = urlparse(search)
+    params = parse_qs(parsed_url.query)
+    start_city = params["start-city"][0]
+    end_city = params["end-city"][0]
+    return start_city, end_city, 1
+
+
+@app.callback(
     Output("intermediate-cities-container", "children"),
     Input("add-intermediate-city", "n_clicks"),
     Input({"type": "remove-button", "index": ALL}, "n_clicks"),
@@ -318,88 +352,91 @@ def update_intermediate_city(add_clicks, remove_clicks, children):
     prevent_initial_call=True,
 )
 def get_weather(n_clicks, start_city, end_city, intermediate_cities):
-    global df
+    if n_clicks > 0:
 
-    if not start_city or not end_city:
-        return "", True, "Укажите начальный и конечный города."
+        global df
+        if not start_city or not end_city:
+            return "", True, "Укажите начальный и конечный города."
 
-    cities = [start_city] + (intermediate_cities or []) + [end_city]
-    cities = [x for x in cities if x is not None]
+        cities = [start_city] + (intermediate_cities or []) + [end_city]
+        cities = [x for x in cities if x is not None]
 
-    all_data = []
-    graphs = []
+        all_data = []
+        graphs = []
 
-    for city in cities:
-        location_key = get_location_key(city)
-        if not location_key:
-            return "", True, f"Не удалось найти данные для города {city}."
+        for city in cities:
+            location_key = get_location_key(city)
+            if not location_key:
+                return "", True, f"Не удалось найти данные для города {city}."
 
-        forecast = get_forecast_data(location_key)
-        if forecast:
-            city_df = create_df(forecast)
-            city_df["City"] = city
-            all_data.append(city_df)
+            forecast = get_forecast_data(location_key)
+            if forecast:
+                city_df = create_df(forecast)
+                city_df["City"] = city
+                all_data.append(city_df)
 
-            graph_controls = html.Div(
-                [
-                    dcc.RadioItems(
-                        id={"type": "forecast-type-radio", "index": city},
-                        options=[
-                            {"label": "Температура", "value": "Temperature"},
-                            {"label": "Скорость ветра", "value": "Wind Speed"},
-                            {
-                                "label": "Вероятность осадков",
-                                "value": "Precipitation Probability",
-                            },
-                        ],
-                        value="Temperature",
-                        inline=True,
-                        style={"display": "flex", "gap": "20px"},
-                    ),
-                    dcc.Slider(
-                        1,
-                        5,
-                        2,
-                        value=3,
-                        id={"type": "forecast-days-slider", "index": city},
-                    ),
-                ]
-            )
-
-            graph = dcc.Graph(
-                id={"type": "forecast-graph", "index": city},
-                figure=create_graph(city_df, "Temperature", 3),
-            )
-
-            graphs.append(
-                dbc.Card(
-                    dbc.CardBody(
-                        [
-                            html.H4(f"Город: {city}", className="text-center"),
-                            graph_controls,
-                            graph,
-                        ]
-                    ),
-                    className="mb-4",
+                graph_controls = html.Div(
+                    [
+                        dcc.RadioItems(
+                            id={"type": "forecast-type-radio", "index": city},
+                            options=[
+                                {"label": "Температура", "value": "Temperature"},
+                                {"label": "Скорость ветра", "value": "Wind Speed"},
+                                {
+                                    "label": "Вероятность осадков",
+                                    "value": "Precipitation Probability",
+                                },
+                            ],
+                            value="Temperature",
+                            inline=True,
+                            style={"display": "flex", "gap": "20px"},
+                        ),
+                        dcc.Slider(
+                            1,
+                            5,
+                            2,
+                            value=3,
+                            id={"type": "forecast-days-slider", "index": city},
+                        ),
+                    ]
                 )
+
+                graph = dcc.Graph(
+                    id={"type": "forecast-graph", "index": city},
+                    figure=create_graph(city_df, "Temperature", 3),
+                )
+
+                graphs.append(
+                    dbc.Card(
+                        dbc.CardBody(
+                            [
+                                html.H4(f"Город: {city}", className="text-center"),
+                                graph_controls,
+                                graph,
+                            ]
+                        ),
+                        className="mb-4",
+                    )
+                )
+            else:
+                return "", True, f"Не удалось загрузить прогноз для города {city}."
+
+        df = pd.concat(all_data, ignore_index=True)
+        graphs.append(
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H4(f"Маршрут между городами", className="text-center"),
+                        dcc.Graph(figure=create_map(cities)),
+                    ]
+                ),
+                className="mb-4",
             )
-        else:
-            return "", True, f"Не удалось загрузить прогноз для города {city}."
-
-    df = pd.concat(all_data, ignore_index=True)
-    graphs.append(
-        dbc.Card(
-            dbc.CardBody(
-                [
-                    html.H4(f"Маршрут между городами", className="text-center"),
-                    dcc.Graph(figure=create_map(cities)),
-                ]
-            ),
-            className="mb-4",
         )
-    )
 
-    return graphs, False, ""
+        return graphs, False, ""
+    else:
+        return "", False, ""
 
 
 @app.callback(
